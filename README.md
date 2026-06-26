@@ -46,37 +46,10 @@ User → /play URL
 ## Installation
 
 ```bash
-# 1. Clone and install PHP dependencies
-git clone <your-repo>
+git clone https://github.com/music-miko/MusicBot
 cd MusicBot
-composer install
+bash install.sh
 
-# 2. Install yt-dlp
-pip install yt-dlp
-# or
-curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
-chmod +x /usr/local/bin/yt-dlp
-
-# 3. Build phptgcalls
-git clone https://github.com/TakNone/phptgcalls
-cd phptgcalls && composer install
-cp -r . /path/to/MusicBot/bin/phptgcalls
-cd ..
-
-# 4. Build LiveProto
-git clone https://github.com/TakNone/LiveProto
-cd LiveProto && composer install
-cp -r . /path/to/MusicBot/bin/liveproto
-cd ..
-
-# 5. Configure
-cp .env.example .env
-nano .env        # fill in BOT_TOKEN, API_ID, API_HASH, SESSION, API_KEY, etc.
-
-# 6. Create required directories
-mkdir -p downloads cookies logs bin
-
-# 7. Start the bot
 php bot.php
 ```
 
