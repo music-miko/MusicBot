@@ -128,6 +128,16 @@ class TelegramApi
 
     // ── Raw API call ─────────────────────────────────────────────────────────
 
+    /**
+     * Make a raw call to the Telegram Bot API.
+     *
+     * Telegram's `result` field is usually an object (decoded as an array),
+     * but several methods (answerCallbackQuery, deleteMessage, and edit*
+     * when the new content is identical to the old) return a bare boolean
+     * `true` instead. We normalize that to an empty array so the ?array
+     * return type always holds and callers can treat "truthy non-null" as
+     * success regardless of which shape Telegram sent back.
+     */
     public function call(string $method, array $params = []): ?array
     {
         try {
@@ -137,9 +147,16 @@ class TelegramApi
                 $this->log->warning("Telegram API [$method] error: " . ($data['description'] ?? 'unknown'));
                 return null;
             }
-            return $data['result'] ?? [];
+            $result = $data['result'] ?? [];
+            return is_array($result) ? $result : [];
         } catch (GuzzleException $e) {
-            $this->log->error("Telegram API [$method] HTTP error: " . $e->getMessage());
+            $msg = $e->getMessage();
+            if (str_contains($msg, 'message is not modified')) {
+                // Harmless: user re-tapped a button whose content didn't change.
+                $this->log->debug("Telegram API [$method]: message not modified (ignored)");
+            } else {
+                $this->log->error("Telegram API [$method] HTTP error: " . $msg);
+            }
             return null;
         }
     }
