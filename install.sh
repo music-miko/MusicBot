@@ -46,7 +46,7 @@ command -v php >/dev/null 2>&1 || die "PHP not found. Install PHP 8.4:
   sudo add-apt-repository ppa:ondrej/php
   sudo apt update
   sudo apt install -y php8.4 php8.4-cli php8.4-common php8.4-curl \\
-       php8.4-mbstring php8.4-gmp php8.4-xml php8.4-intl"
+       php8.4-mbstring php8.4-gmp php8.4-xml php8.4-intl php8.4-dev"
 
 PHP_MAJOR=$(php -r 'echo PHP_MAJOR_VERSION;')
 PHP_MINOR=$(php -r 'echo PHP_MINOR_VERSION;')
@@ -59,7 +59,7 @@ if [[ "$PHP_MAJOR" -lt 8 ]] || { [[ "$PHP_MAJOR" -eq 8 ]] && [[ "$PHP_MINOR" -lt
     sudo add-apt-repository ppa:ondrej/php
     sudo apt update
     sudo apt install -y php8.4 php8.4-cli php8.4-common php8.4-curl \\
-         php8.4-mbstring php8.4-gmp php8.4-xml php8.4-intl
+         php8.4-mbstring php8.4-gmp php8.4-xml php8.4-intl php8.4-dev
     sudo update-alternatives --set php /usr/bin/php8.4"
 fi
 info "PHP $PHP_VER"
@@ -75,6 +75,21 @@ if [[ ${#MISSING_EXTS[@]} -gt 0 ]]; then
 fi
 info "PHP extensions OK (curl, json, openssl, mbstring, gmp)"
 
+# php-config (from php8.4-dev) is required to build the phptgcalls Rust
+# extension (ext-php-rs links against the PHP embed SDK).
+if ! command -v php-config >/dev/null 2>&1; then
+  warn "php-config not found (needed to build phptgcalls) — installing php${PHP_VER}-dev..."
+  if command -v apt-get >/dev/null 2>&1; then
+    SUDO=""
+    [[ "$EUID" -ne 0 ]] && SUDO="sudo"
+    $SUDO apt-get update -q
+    $SUDO apt-get install -y -q "php${PHP_VER}-dev"
+  else
+    die "Please install manually: sudo apt install php${PHP_VER}-dev"
+  fi
+fi
+info "php-config $(php-config --version 2>/dev/null)"
+
 # ── 3. Composer ───────────────────────────────────────────────────────────────
 section "Composer"
 
@@ -85,12 +100,12 @@ for candidate in /usr/local/bin/composer /usr/local/bin/composer2 /usr/bin/compo
   if command -v "$candidate" >/dev/null 2>&1; then
     _ver=$("$candidate" --version --no-interaction 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1 || true)
     _major=${_ver%%.*}
+    _minor=$(echo "$_ver" | cut -d. -f2)
     if [[ -n "$_major" ]] && [[ "$_major" -ge 2 ]]; then
-      # Check plugin-api version >= 2.5
-      _plugin_ver=$("$candidate" --version --no-interaction 2>/dev/null | grep -oP 'Plugin API \K[\d.]+' || echo "0")
-      _plugin_major=${_plugin_ver%%.*}
-      _plugin_minor=$(echo "$_plugin_ver" | cut -d. -f2)
-      if [[ "$_plugin_major" -gt 2 ]] || { [[ "$_plugin_major" -eq 2 ]] && [[ "$_plugin_minor" -ge 5 ]]; }; then
+      # Composer >= 2.5 always ships Plugin API >= 2.5, so the Composer
+      # version itself is sufficient. Some builds don't print a "Plugin API"
+      # line in plain `--version` output, so we no longer depend on parsing it.
+      if [[ "$_major" -gt 2 ]] || { [[ "$_major" -eq 2 ]] && [[ "$_minor" -ge 5 ]]; }; then
         COMPOSER="$candidate"
         break
       fi
@@ -165,7 +180,10 @@ if command -v ffmpeg >/dev/null 2>&1; then
 else
   warn "ffmpeg not found — installing..."
   if command -v apt-get >/dev/null 2>&1; then
-    apt-get install -y -q ffmpeg
+    SUDO=""
+    [[ "$EUID" -ne 0 ]] && SUDO="sudo"
+    $SUDO apt-get update -q
+    $SUDO apt-get install -y -q ffmpeg
     info "ffmpeg installed"
   else
     warn "Could not auto-install ffmpeg. Install manually:"
@@ -191,17 +209,26 @@ fi
 [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
 command -v cargo >/dev/null 2>&1 || die "cargo not found after Rust install. Run: source \$HOME/.cargo/env"
 
-# ── 8. Clang (required by ext-php-rs) ────────────────────────────────────────
+# ── 8. Clang & native build deps (required by ext-php-rs / openssl-sys) ──────
 section "Clang"
-if ! command -v clang >/dev/null 2>&1; then
-  warn "Clang not found — installing..."
+MISSING_NATIVE_PKGS=()
+command -v clang >/dev/null 2>&1 || MISSING_NATIVE_PKGS+=(clang libclang-dev)
+command -v pkg-config >/dev/null 2>&1 || MISSING_NATIVE_PKGS+=(pkg-config)
+dpkg -s libssl-dev >/dev/null 2>&1 || MISSING_NATIVE_PKGS+=(libssl-dev)
+
+if [[ ${#MISSING_NATIVE_PKGS[@]} -gt 0 ]]; then
+  warn "Missing native build deps (${MISSING_NATIVE_PKGS[*]}) — installing..."
   if command -v apt-get >/dev/null 2>&1; then
-    apt-get install -y -q clang libclang-dev
+    SUDO=""
+    [[ "$EUID" -ne 0 ]] && SUDO="sudo"
+    $SUDO apt-get update -q
+    $SUDO apt-get install -y -q "${MISSING_NATIVE_PKGS[@]}"
   else
-    die "Please install clang manually: sudo apt install clang libclang-dev"
+    die "Please install manually: sudo apt install ${MISSING_NATIVE_PKGS[*]}"
   fi
 fi
 info "$(clang --version | head -1)"
+info "$(pkg-config --version | sed 's/^/pkg-config /')"
 
 # ── 9. phptgcalls ─────────────────────────────────────────────────────────────
 section "phptgcalls"
@@ -223,9 +250,45 @@ run_composer "$PHPTGCALLS_DIR" install --prefer-dist --optimize-autoloader --no-
 if [[ -f "$PHPTGCALLS_DIR/ext/install.sh" ]]; then
   info "Building phptgcalls Rust extension (this takes several minutes)..."
   cd "$PHPTGCALLS_DIR/ext"
-  bash install.sh
+  bash install.sh || true
   cd "$ROOT_DIR"
-  info "phptgcalls Rust extension built"
+
+  # ext/install.sh's final `cp` into the PHP extension dir requires root and
+  # silently fails for non-root users (it just prints "Permission denied").
+  # Verify the extension actually landed there and self-heal with sudo if not.
+  PHP_EXT_DIR=$(php-config --extension-dir 2>/dev/null || true)
+  BUILT_SO="$PHPTGCALLS_DIR/ext/target/release/libphptgcalls.so"
+  if [[ -n "$PHP_EXT_DIR" ]] && [[ -f "$BUILT_SO" ]] && [[ ! -f "$PHP_EXT_DIR/phptgcalls.so" ]]; then
+    warn "phptgcalls.so missing from $PHP_EXT_DIR — copying with sudo..."
+    SUDO=""
+    [[ "$EUID" -ne 0 ]] && SUDO="sudo"
+    $SUDO cp "$BUILT_SO" "$PHP_EXT_DIR/phptgcalls.so"
+  fi
+
+  # The extension dynamically links against libntgcalls.so, downloaded by the
+  # build into ext/ntgcalls/lib/. Make sure it's on the system library path.
+  NTGCALLS_SO="$PHPTGCALLS_DIR/ext/ntgcalls/lib/libntgcalls.so"
+  if [[ -f "$NTGCALLS_SO" ]] && ! ldconfig -p 2>/dev/null | grep -q libntgcalls.so; then
+    warn "libntgcalls.so not on system library path — installing with sudo..."
+    SUDO=""
+    [[ "$EUID" -ne 0 ]] && SUDO="sudo"
+    $SUDO cp "$NTGCALLS_SO" /usr/lib/x86_64-linux-gnu/
+    $SUDO ldconfig
+  fi
+
+  # Ensure PHP actually loads the extension.
+  PHP_CONF_DIR=$(php --ini 2>/dev/null | grep "Scan for additional" | sed 's/.*: *//')
+  if [[ -n "$PHP_CONF_DIR" ]] && [[ ! -f "$PHP_CONF_DIR/20-phptgcalls.ini" ]]; then
+    SUDO=""
+    [[ "$EUID" -ne 0 ]] && SUDO="sudo"
+    echo "extension=phptgcalls.so" | $SUDO tee "$PHP_CONF_DIR/20-phptgcalls.ini" >/dev/null
+  fi
+
+  if php -m 2>/dev/null | grep -qi '^phptgcalls$'; then
+    info "phptgcalls Rust extension built and loaded"
+  else
+    warn "phptgcalls Rust extension built, but PHP isn't loading it yet. Run 'php -m | grep -i phptgcalls' to debug."
+  fi
 else
   warn "No ext/install.sh found in phptgcalls — skipping Rust build."
 fi
