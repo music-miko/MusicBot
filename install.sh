@@ -250,9 +250,45 @@ run_composer "$PHPTGCALLS_DIR" install --prefer-dist --optimize-autoloader --no-
 if [[ -f "$PHPTGCALLS_DIR/ext/install.sh" ]]; then
   info "Building phptgcalls Rust extension (this takes several minutes)..."
   cd "$PHPTGCALLS_DIR/ext"
-  bash install.sh
+  bash install.sh || true
   cd "$ROOT_DIR"
-  info "phptgcalls Rust extension built"
+
+  # ext/install.sh's final `cp` into the PHP extension dir requires root and
+  # silently fails for non-root users (it just prints "Permission denied").
+  # Verify the extension actually landed there and self-heal with sudo if not.
+  PHP_EXT_DIR=$(php-config --extension-dir 2>/dev/null || true)
+  BUILT_SO="$PHPTGCALLS_DIR/ext/target/release/libphptgcalls.so"
+  if [[ -n "$PHP_EXT_DIR" ]] && [[ -f "$BUILT_SO" ]] && [[ ! -f "$PHP_EXT_DIR/phptgcalls.so" ]]; then
+    warn "phptgcalls.so missing from $PHP_EXT_DIR — copying with sudo..."
+    SUDO=""
+    [[ "$EUID" -ne 0 ]] && SUDO="sudo"
+    $SUDO cp "$BUILT_SO" "$PHP_EXT_DIR/phptgcalls.so"
+  fi
+
+  # The extension dynamically links against libntgcalls.so, downloaded by the
+  # build into ext/ntgcalls/lib/. Make sure it's on the system library path.
+  NTGCALLS_SO="$PHPTGCALLS_DIR/ext/ntgcalls/lib/libntgcalls.so"
+  if [[ -f "$NTGCALLS_SO" ]] && ! ldconfig -p 2>/dev/null | grep -q libntgcalls.so; then
+    warn "libntgcalls.so not on system library path — installing with sudo..."
+    SUDO=""
+    [[ "$EUID" -ne 0 ]] && SUDO="sudo"
+    $SUDO cp "$NTGCALLS_SO" /usr/lib/x86_64-linux-gnu/
+    $SUDO ldconfig
+  fi
+
+  # Ensure PHP actually loads the extension.
+  PHP_CONF_DIR=$(php --ini 2>/dev/null | grep "Scan for additional" | sed 's/.*: *//')
+  if [[ -n "$PHP_CONF_DIR" ]] && [[ ! -f "$PHP_CONF_DIR/20-phptgcalls.ini" ]]; then
+    SUDO=""
+    [[ "$EUID" -ne 0 ]] && SUDO="sudo"
+    echo "extension=phptgcalls.so" | $SUDO tee "$PHP_CONF_DIR/20-phptgcalls.ini" >/dev/null
+  fi
+
+  if php -m 2>/dev/null | grep -qi '^phptgcalls$'; then
+    info "phptgcalls Rust extension built and loaded"
+  else
+    warn "phptgcalls Rust extension built, but PHP isn't loading it yet. Run 'php -m | grep -i phptgcalls' to debug."
+  fi
 else
   warn "No ext/install.sh found in phptgcalls — skipping Rust build."
 fi
