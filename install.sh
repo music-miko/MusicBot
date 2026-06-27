@@ -46,7 +46,7 @@ command -v php >/dev/null 2>&1 || die "PHP not found. Install PHP 8.4:
   sudo add-apt-repository ppa:ondrej/php
   sudo apt update
   sudo apt install -y php8.4 php8.4-cli php8.4-common php8.4-curl \\
-       php8.4-mbstring php8.4-gmp php8.4-xml php8.4-intl"
+       php8.4-mbstring php8.4-gmp php8.4-xml php8.4-intl php8.4-dev"
 
 PHP_MAJOR=$(php -r 'echo PHP_MAJOR_VERSION;')
 PHP_MINOR=$(php -r 'echo PHP_MINOR_VERSION;')
@@ -59,7 +59,7 @@ if [[ "$PHP_MAJOR" -lt 8 ]] || { [[ "$PHP_MAJOR" -eq 8 ]] && [[ "$PHP_MINOR" -lt
     sudo add-apt-repository ppa:ondrej/php
     sudo apt update
     sudo apt install -y php8.4 php8.4-cli php8.4-common php8.4-curl \\
-         php8.4-mbstring php8.4-gmp php8.4-xml php8.4-intl
+         php8.4-mbstring php8.4-gmp php8.4-xml php8.4-intl php8.4-dev
     sudo update-alternatives --set php /usr/bin/php8.4"
 fi
 info "PHP $PHP_VER"
@@ -74,6 +74,21 @@ if [[ ${#MISSING_EXTS[@]} -gt 0 ]]; then
   sudo apt install -y ${MISSING_EXTS[*]}"
 fi
 info "PHP extensions OK (curl, json, openssl, mbstring, gmp)"
+
+# php-config (from php8.4-dev) is required to build the phptgcalls Rust
+# extension (ext-php-rs links against the PHP embed SDK).
+if ! command -v php-config >/dev/null 2>&1; then
+  warn "php-config not found (needed to build phptgcalls) — installing php${PHP_VER}-dev..."
+  if command -v apt-get >/dev/null 2>&1; then
+    SUDO=""
+    [[ "$EUID" -ne 0 ]] && SUDO="sudo"
+    $SUDO apt-get update -q
+    $SUDO apt-get install -y -q "php${PHP_VER}-dev"
+  else
+    die "Please install manually: sudo apt install php${PHP_VER}-dev"
+  fi
+fi
+info "php-config $(php-config --version 2>/dev/null)"
 
 # ── 3. Composer ───────────────────────────────────────────────────────────────
 section "Composer"
