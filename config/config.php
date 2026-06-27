@@ -58,6 +58,8 @@ define('DOWNLOAD_DIR',  ROOT_DIR . '/downloads');
 define('COOKIES_DIR',   ROOT_DIR . '/cookies');
 define('LOGS_DIR',      ROOT_DIR . '/logs');
 
+define('JOIN_TIMEOUT_SEC', (int) env('JOIN_TIMEOUT_SEC', 25));
+
 // ─── /start UI (mirrors tosu4's config.SUPPORT_CHAT / SUPPORT_CHANNEL / START_IMG_URL)
 define('SUPPORT_CHAT',    env('SUPPORT_CHAT',    'https://t.me/arcchatz'));
 define('SUPPORT_CHANNEL', env('SUPPORT_CHANNEL', 'https://t.me/arcupdates'));
