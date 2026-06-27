@@ -70,10 +70,16 @@ class VideoCallManager
     /**
      * Join or re-use existing call and start streaming a file.
      *
+     * Waits for phptgcalls' own "joined"/"error" event before returning,
+     * since a successful pipe write only confirms the command was *sent* —
+     * not that the assistant account actually authenticated and joined the
+     * group call. Trusting the write alone was the root cause of the bot
+     * reporting "Now Playing" while no audio was actually streaming.
+     *
      * @param int    $chatId   Telegram group/supergroup chat ID
      * @param string $file     Local path to audio/video file (opus/mp4/mkv)
      * @param bool   $isVideo  True = stream video+audio; false = audio only
-     * @return bool
+     * @return bool  True only if phptgcalls confirmed it joined and is streaming.
      */
     public function joinAndPlay(int $chatId, string $file, bool $isVideo = false): bool
     {
@@ -84,11 +90,13 @@ class VideoCallManager
 
         if ($this->isAlive($chatId)) {
             // Already in call — just stream the new file
-            return $this->sendCommand($chatId, [
-                'action' => 'stream',
+            $sent = $this->sendCommand($chatId, [
+                'action'  => 'stream',
                 'chat_id' => $chatId,
-                'file'   => $file,
+                'file'    => $file,
             ]);
+            if (!$sent) return false;
+            return $this->awaitEvent($chatId, ['playing'], ['error'], JOIN_TIMEOUT_SEC);
         }
 
         // Spawn new phptgcalls process for this chat
@@ -182,12 +190,88 @@ class VideoCallManager
         $this->log->info("[VCM] Spawned phptgcalls for chat $chatId");
 
         // Send join+play command
-        return $this->sendCommand($chatId, [
+        $sent = $this->sendCommand($chatId, [
             'action'  => 'join',
             'chat_id' => $chatId,
             'file'    => $file,
             'video'   => $isVideo,
         ]);
+        if (!$sent) {
+            $this->log->error("[VCM] Failed to write join command for chat $chatId");
+            $this->cleanup($chatId);
+            return false;
+        }
+
+        // Block (with timeout) until phptgcalls confirms it actually joined
+        // the group call and started streaming — a successful pipe write
+        // above only means the command was *sent*, not that the assistant
+        // account authenticated and joined.
+        $joined = $this->awaitEvent($chatId, ['joined', 'playing'], ['error'], JOIN_TIMEOUT_SEC);
+        if (!$joined) {
+            $this->log->error("[VCM] phptgcalls did not confirm join for chat $chatId — tearing down");
+            $this->cleanup($chatId);
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Block (briefly, with timeout) reading the subprocess's stdout for one
+     * of the given success or failure event names. Returns true only on a
+     * success event; false on a failure event, timeout, or dead process.
+     *
+     * @param string[] $successEvents e.g. ['joined', 'playing']
+     * @param string[] $failureEvents e.g. ['error']
+     */
+    private function awaitEvent(int $chatId, array $successEvents, array $failureEvents, int $timeoutSec): bool
+    {
+        if (!isset($this->pipes[$chatId])) {
+            return false;
+        }
+        $stdout = $this->pipes[$chatId][1];
+        $deadline = microtime(true) + $timeoutSec;
+
+        while (microtime(true) < $deadline) {
+            if (!$this->isAlive($chatId)) {
+                $this->log->error("[VCM] Process died while awaiting event for chat $chatId");
+                return false;
+            }
+
+            $read   = [$stdout];
+            $write  = null;
+            $except = null;
+            $ready  = @stream_select($read, $write, $except, 0, 200000); // 200ms poll
+
+            if ($ready === false || $ready === 0) {
+                continue;
+            }
+
+            $line = fgets($stdout);
+            if ($line === false || trim($line) === '') {
+                continue;
+            }
+
+            $data = json_decode(trim($line), true);
+            if (!is_array($data) || !isset($data['event'])) {
+                continue;
+            }
+
+            $event = $data['event'];
+            if (in_array($event, $successEvents, true)) {
+                $this->log->info("[VCM] Confirmed event '$event' for chat $chatId");
+                return true;
+            }
+            if (in_array($event, $failureEvents, true)) {
+                $reason = $data['message'] ?? 'unknown error';
+                $this->log->error("[VCM] phptgcalls reported error for chat $chatId: $reason");
+                return false;
+            }
+            // Any other event (e.g. unrelated status) — keep waiting.
+        }
+
+        $this->log->error("[VCM] Timed out waiting for join confirmation for chat $chatId (waited {$timeoutSec}s)");
+        return false;
     }
 
     private function sendCommand(int $chatId, array $cmd): bool
