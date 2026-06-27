@@ -203,55 +203,71 @@ if ! command -v clang >/dev/null 2>&1; then
 fi
 info "$(clang --version | head -1)"
 
-# ── 9. phptgcalls ─────────────────────────────────────────────────────────────
-section "phptgcalls"
-mkdir -p "$BIN_DIR"
-PHPTGCALLS_DIR="$BIN_DIR/phptgcalls"
+# ── 9. phptgcalls Rust extension ──────────────────────────────────────────────
+# taknone/phptgcalls and taknone/liveproto are now real composer dependencies
+# of MusicBot itself (see composer.json) and were already installed by the
+# main "PHP dependencies" step above — there is no separate clone anymore.
+#
+# However: composer only auto-runs a package's own post-install-cmd when
+# that package IS the root project. Since phptgcalls is a dependency here,
+# its "cd ext && bash install.sh" hook (which builds the native Rust
+# extension) does NOT fire automatically — we have to trigger it ourselves.
+section "phptgcalls Rust extension"
+PHPTGCALLS_DIR="$ROOT_DIR/vendor/taknone/phptgcalls"
 
-if [[ -d "$PHPTGCALLS_DIR/.git" ]]; then
-  warn "phptgcalls already cloned — pulling latest..."
-  git -C "$PHPTGCALLS_DIR" pull --quiet
-else
-  info "Cloning phptgcalls..."
-  git clone --quiet https://github.com/TakNone/phptgcalls "$PHPTGCALLS_DIR"
+if [[ ! -d "$PHPTGCALLS_DIR" ]]; then
+  die "vendor/taknone/phptgcalls not found — did the main composer install succeed?"
 fi
 
-# Install PHP deps for phptgcalls
-run_composer "$PHPTGCALLS_DIR" install --prefer-dist --optimize-autoloader --no-scripts
-
-# Build the Rust extension
 if [[ -f "$PHPTGCALLS_DIR/ext/install.sh" ]]; then
   info "Building phptgcalls Rust extension (this takes several minutes)..."
   cd "$PHPTGCALLS_DIR/ext"
-  bash install.sh
+  bash install.sh || true
   cd "$ROOT_DIR"
-  info "phptgcalls Rust extension built"
+
+  # ext/install.sh's final `cp` into the PHP extension dir requires root and
+  # silently fails for non-root users. Verify the extension actually landed
+  # there and self-heal with sudo if not (see prior fixes — same pattern).
+  PHP_EXT_DIR=$(php-config --extension-dir 2>/dev/null || true)
+  BUILT_SO="$PHPTGCALLS_DIR/ext/target/release/libphptgcalls.so"
+  if [[ -n "$PHP_EXT_DIR" ]] && [[ -f "$BUILT_SO" ]] && [[ ! -f "$PHP_EXT_DIR/phptgcalls.so" ]]; then
+    warn "phptgcalls.so missing from $PHP_EXT_DIR — copying with sudo..."
+    SUDO=""
+    [[ "$EUID" -ne 0 ]] && SUDO="sudo"
+    $SUDO cp "$BUILT_SO" "$PHP_EXT_DIR/phptgcalls.so"
+  fi
+
+  NTGCALLS_SO="$PHPTGCALLS_DIR/ext/ntgcalls/lib/libntgcalls.so"
+  if [[ -f "$NTGCALLS_SO" ]] && ! ldconfig -p 2>/dev/null | grep -q libntgcalls.so; then
+    warn "libntgcalls.so not on system library path — installing with sudo..."
+    SUDO=""
+    [[ "$EUID" -ne 0 ]] && SUDO="sudo"
+    $SUDO cp "$NTGCALLS_SO" /usr/lib/x86_64-linux-gnu/
+    $SUDO ldconfig
+  fi
+
+  PHP_CONF_DIR=$(php --ini 2>/dev/null | grep "Scan for additional" | sed 's/.*: *//')
+  if [[ -n "$PHP_CONF_DIR" ]] && [[ ! -f "$PHP_CONF_DIR/20-phptgcalls.ini" ]]; then
+    SUDO=""
+    [[ "$EUID" -ne 0 ]] && SUDO="sudo"
+    echo "extension=phptgcalls.so" | $SUDO tee "$PHP_CONF_DIR/20-phptgcalls.ini" >/dev/null
+  fi
+
+  if php -m 2>/dev/null | grep -qi '^phptgcalls$'; then
+    info "phptgcalls Rust extension built and loaded"
+  else
+    warn "phptgcalls Rust extension built, but PHP isn't loading it yet. Run 'php -m | grep -i phptgcalls' to debug."
+  fi
 else
-  warn "No ext/install.sh found in phptgcalls — skipping Rust build."
-fi
-info "phptgcalls ready at $PHPTGCALLS_DIR"
-
-# ── 10. LiveProto ─────────────────────────────────────────────────────────────
-section "LiveProto"
-LIVEPROTO_DIR="$BIN_DIR/liveproto"
-
-if [[ -d "$LIVEPROTO_DIR/.git" ]]; then
-  warn "LiveProto already cloned — pulling latest..."
-  git -C "$LIVEPROTO_DIR" pull --quiet
-else
-  info "Cloning LiveProto..."
-  git clone --quiet https://github.com/TakNone/LiveProto "$LIVEPROTO_DIR"
+  warn "No ext/install.sh found at $PHPTGCALLS_DIR/ext — skipping Rust build."
 fi
 
-run_composer "$LIVEPROTO_DIR" install --prefer-dist --optimize-autoloader
-info "LiveProto ready at $LIVEPROTO_DIR"
-
-# ── 11. Runtime directories ───────────────────────────────────────────────────
+# ── 10. Runtime directories ───────────────────────────────────────────────────
 section "Directories"
-mkdir -p "$ROOT_DIR/downloads" "$ROOT_DIR/cookies" "$ROOT_DIR/logs"
+mkdir -p "$ROOT_DIR/downloads" "$ROOT_DIR/cookies" "$ROOT_DIR/logs" "$ROOT_DIR/queue/commands" "$ROOT_DIR/queue/results"
 info "Runtime directories OK"
 
-# ── 12. .env setup ───────────────────────────────────────────────────────────
+# ── 11. .env setup ───────────────────────────────────────────────────────────
 section ".env"
 if [[ -f "$ROOT_DIR/.env" ]]; then
   warn ".env already exists — skipping copy (delete it to reset)"

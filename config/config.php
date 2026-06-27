@@ -58,17 +58,22 @@ define('DOWNLOAD_DIR',  ROOT_DIR . '/downloads');
 define('COOKIES_DIR',   ROOT_DIR . '/cookies');
 define('LOGS_DIR',      ROOT_DIR . '/logs');
 
+// How long to wait for phptgcalls to confirm it actually joined the group
+// call before giving up and reporting failure to the user.
 define('JOIN_TIMEOUT_SEC', (int) env('JOIN_TIMEOUT_SEC', 25));
 
 // ─── /start UI (mirrors tosu4's config.SUPPORT_CHAT / SUPPORT_CHANNEL / START_IMG_URL)
-define('SUPPORT_CHAT',    env('SUPPORT_CHAT',    'https://t.me/arcchatz'));
-define('SUPPORT_CHANNEL', env('SUPPORT_CHANNEL', 'https://t.me/arcupdates'));
-define('START_IMG_URL',   env('START_IMG_URL',   'https://files.catbox.moe/hrs8oc.jpg'));
+define('SUPPORT_CHAT',    env('SUPPORT_CHAT',    'https://t.me/'));
+define('SUPPORT_CHANNEL', env('SUPPORT_CHANNEL', 'https://t.me/'));
+define('START_IMG_URL',   env('START_IMG_URL',   'https://telegra.ph/file/4495caf18f1d9d4f5e1f5.jpg'));
 
 // ─── phptgcalls / LiveProto paths ────────────────────────────────────────────
 // https://github.com/TakNone/phptgcalls  &  https://github.com/TakNone/LiveProto
-define('PHPTGCALLS_BIN', env('PHPTGCALLS_BIN', ROOT_DIR . '/bin/phptgcalls'));
-define('LIVEPROTO_BIN',  env('LIVEPROTO_BIN',  ROOT_DIR . '/bin/liveproto'));
+// NOTE: PHPTGCALLS_BIN / LIVEPROTO_BIN previously pointed at separate
+// sibling-cloned binaries under bin/. Both are now real composer
+// dependencies (taknone/phptgcalls, taknone/liveproto) loaded in-process
+// by bin/assistant_worker.php via vendor/autoload.php — there is no
+// separate binary path to configure anymore.
 
 // ─── Polling settings ─────────────────────────────────────────────────────────
 define('POLL_TIMEOUT',  30);    // long-poll seconds

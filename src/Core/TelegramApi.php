@@ -96,6 +96,27 @@ class TelegramApi
         ]);
     }
 
+    /** Generate a fresh invite link for a chat (requires the bot to have invite-link permission). */
+    public function exportChatInviteLink(int|string $chatId): ?string
+    {
+        $result = $this->call('exportChatInviteLink', ['chat_id' => $chatId]);
+        return $result['_value'] ?? null;
+    }
+
+    /**
+     * Approve a pending join request for a user in a chat — needed when the
+     * chat has "approve new members" enabled, so joining via invite link
+     * doesn't complete immediately (mirrors tosu4's approve_chat_join_request
+     * call after the assistant's join_chat() raises InviteRequestSent).
+     */
+    public function approveChatJoinRequest(int|string $chatId, int $userId): bool
+    {
+        return $this->call('approveChatJoinRequest', [
+            'chat_id' => $chatId,
+            'user_id' => $userId,
+        ]) !== null;
+    }
+
     // ── Bot identity ─────────────────────────────────────────────────────────
 
     /**
@@ -132,11 +153,14 @@ class TelegramApi
      * Make a raw call to the Telegram Bot API.
      *
      * Telegram's `result` field is usually an object (decoded as an array),
-     * but several methods (answerCallbackQuery, deleteMessage, and edit*
-     * when the new content is identical to the old) return a bare boolean
-     * `true` instead. We normalize that to an empty array so the ?array
-     * return type always holds and callers can treat "truthy non-null" as
-     * success regardless of which shape Telegram sent back.
+     * but several methods return a bare scalar instead:
+     *   - answerCallbackQuery, deleteMessage, edit* (unchanged content) → true
+     *   - exportChatInviteLink                                          → a string URL
+     *
+     * Since this method's return type is ?array, scalar results are boxed
+     * under a '_value' key so callers don't lose the actual data (a naive
+     * "just return [] for non-arrays" would silently discard real return
+     * values like the invite link string).
      */
     public function call(string $method, array $params = []): ?array
     {
@@ -148,7 +172,7 @@ class TelegramApi
                 return null;
             }
             $result = $data['result'] ?? [];
-            return is_array($result) ? $result : [];
+            return is_array($result) ? $result : ['_value' => $result];
         } catch (GuzzleException $e) {
             $msg = $e->getMessage();
             if (str_contains($msg, 'message is not modified')) {

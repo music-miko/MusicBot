@@ -40,6 +40,7 @@ class Bot
         TelegramApi::getInstance()->fetchBotInfo();
         $this->setupCommands();
         $this->discardBacklog();
+        $this->verifyAssistantOnStartup();
 
         while (true) {
             try {
@@ -55,6 +56,23 @@ class Bot
                 $this->log->error("Polling loop error: " . $e->getMessage());
                 sleep(1);
             }
+        }
+    }
+
+    /**
+     * Confirm the assistant (LiveProto) session authenticates before the
+     * bot starts serving traffic, so a bad/expired SESSION shows up clearly
+     * in the startup log instead of only surfacing later as a confusing
+     * "could not join voice chat" failure on someone's /play.
+     */
+    private function verifyAssistantOnStartup(): void
+    {
+        $this->log->info("Verifying assistant session...");
+        $ok = VideoCallManager::getInstance()->verifyAssistant();
+        if ($ok) {
+            $this->log->info("✅ Assistant session verified — voice chat streaming is ready.");
+        } else {
+            $this->log->error("❌ Assistant session verification FAILED — voice chat streaming will not work until this is fixed. Check SESSION in .env (run bin/generate_session.php to regenerate it).");
         }
     }
 

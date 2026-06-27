@@ -26,16 +26,10 @@
 
 declare(strict_types=1);
 
-// LiveProto is cloned as a separate sibling project (bin/liveproto), with
-// its own independent `composer install` — it is NOT a dependency listed
-// in MusicBot's own composer.json, so we need its own autoloader here.
-$livProtoAutoload = __DIR__ . '/liveproto/vendor/autoload.php';
-if (!file_exists($livProtoAutoload)) {
-    fwrite(STDERR, "❌ Could not find $livProtoAutoload\n");
-    fwrite(STDERR, "   Make sure install.sh has cloned and set up LiveProto at bin/liveproto first.\n");
-    exit(1);
-}
-require $livProtoAutoload;
+// taknone/liveproto is now a direct composer dependency of MusicBot itself
+// (see composer.json) rather than a separate sibling clone, so the bot's
+// own vendor/autoload.php has everything we need.
+require __DIR__ . '/../vendor/autoload.php';
 
 use Tak\Liveproto\Network\Client;
 use Tak\Liveproto\Utils\Settings;

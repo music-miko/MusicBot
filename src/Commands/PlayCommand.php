@@ -32,6 +32,9 @@ class PlayCommand
     private VideoCallManager $vcm;
     private PlatformResolver $resolver;
 
+    /** Cached invite links per chat, mirroring tosu4's `links` dict — avoids regenerating on every /play. */
+    private static array $inviteLinkCache = [];
+
     public function __construct()
     {
         $this->tg       = TelegramApi::getInstance();
@@ -121,6 +124,18 @@ class PlayCommand
                 return;
             }
 
+            // Pre-flight: is the assistant account actually in this chat?
+            // If not, have it join itself via an invite link — mirrors
+            // tosu4's userbot.join_chat(invitelink) flow. The Bot API has
+            // no method to force-add an arbitrary user to a group; only
+            // the assistant joining itself (or a human admin adding it)
+            // can do that.
+            $ready = $this->ensureAssistantInChat($chatId, $indicatorId);
+            if (!$ready) {
+                $this->queue->clear($chatId);
+                return;
+            }
+
             $joined = $this->vcm->joinAndPlay($chatId, $file, $isVideo);
             if (!$joined) {
                 $this->editOrSend($chatId, $indicatorId,
@@ -178,6 +193,100 @@ class PlayCommand
             $this->tg->sendMessage($chatId, $caption, [
                 'reply_markup' => $keyboard,
             ]);
+        }
+    }
+
+    // ── Assistant membership / auto-join via invite link ────────────────────────
+
+    /**
+     * Make sure the assistant account is actually in this chat before we
+     * try to join the voice chat — and if it isn't, have it join itself via
+     * an invite link. Mirrors tosu4's AnonXMusic/utils/decorators/play.py
+     * sequence: check membership → banned/restricted → get-or-cache invite
+     * link → assistant joins → handle pending-approval / already-joined.
+     *
+     * Edits the indicator message with progress/errors along the way.
+     * Returns true only if the assistant is confirmed present and we should
+     * proceed to joinAndPlay().
+     */
+    private function ensureAssistantInChat(int $chatId, ?int $indicatorId): bool
+    {
+        $assistantId = VideoCallManager::assistantUserId();
+        if ($assistantId === null) {
+            // Assistant identity unknown (verifyAssistant() hasn't
+            // succeeded — e.g. bad SESSION). Don't block here; let
+            // joinAndPlay's own failure path report the real problem.
+            return true;
+        }
+
+        $member = $this->tg->getChatMember($chatId, $assistantId);
+        $status = $member['status'] ?? null;
+
+        // Already a normal member/admin/creator — nothing to do.
+        if ($status !== null && !in_array($status, ['left', 'kicked', 'restricted'], true)) {
+            return true;
+        }
+
+        if ($status === 'kicked') {
+            $this->editOrSend($chatId, $indicatorId,
+                "❌ <b>The assistant account is banned from this group.</b>\n\n" .
+                "Please unban it (Group Settings → Administrators / Banned Users), then try again."
+            );
+            return false;
+        }
+
+        if ($status === 'restricted') {
+            $this->editOrSend($chatId, $indicatorId,
+                "❌ <b>The assistant account is restricted in this group.</b>\n\n" .
+                "Please remove the restriction, then try again."
+            );
+            return false;
+        }
+
+        // Not a member ($status === 'left', or getChatMember returned null
+        // because the assistant was never in the chat at all) — have it
+        // join itself via invite link.
+        $this->editOrSend($chatId, $indicatorId, "🔗 <b>Adding the assistant to this group…</b>");
+
+        $inviteLink = self::$inviteLinkCache[$chatId] ?? $this->tg->exportChatInviteLink($chatId);
+        if (!$inviteLink) {
+            $this->editOrSend($chatId, $indicatorId,
+                "❌ <b>Couldn't generate an invite link for this group.</b>\n\n" .
+                "Make sure the bot is an admin with permission to invite users via link, then try again."
+            );
+            return false;
+        }
+        self::$inviteLinkCache[$chatId] = $inviteLink;
+
+        $outcome = $this->vcm->joinChatViaInvite($inviteLink);
+
+        switch ($outcome) {
+            case VideoCallManager::JOIN_INVITE_OK:
+            case VideoCallManager::JOIN_INVITE_ALREADY_PARTICIPANT:
+                return true;
+
+            case VideoCallManager::JOIN_INVITE_REQUEST_SENT:
+                // Chat has "approve new members" enabled — the assistant's
+                // join request is pending; the bot approves it on its behalf
+                // (mirrors tosu4's app.approve_chat_join_request call).
+                $approved = $this->tg->approveChatJoinRequest($chatId, $assistantId);
+                if ($approved) {
+                    $this->editOrSend($chatId, $indicatorId, "✅ <b>Assistant added — starting playback…</b>");
+                    return true;
+                }
+                $this->editOrSend($chatId, $indicatorId,
+                    "❌ <b>The assistant's join request is pending, but it couldn't be auto-approved.</b>\n\n" .
+                    "Please approve it manually in the group's pending member requests, then try again."
+                );
+                return false;
+
+            default: // JOIN_INVITE_FAILED
+                $this->editOrSend($chatId, $indicatorId,
+                    "❌ <b>The assistant couldn't join this group automatically.</b>\n\n" .
+                    "Please add it manually using this invite link, then try again:\n" .
+                    "<code>" . htmlspecialchars($inviteLink) . "</code>"
+                );
+                return false;
         }
     }
 

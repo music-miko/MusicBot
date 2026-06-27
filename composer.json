@@ -12,7 +12,9 @@
     "ext-openssl": "*",
     "guzzlehttp/guzzle": "^7.0",
     "monolog/monolog": "^3.0",
-    "vlucas/phpdotenv": "^5.5"
+    "vlucas/phpdotenv": "^5.5",
+    "taknone/liveproto": "*",
+    "taknone/phptgcalls": "*"
   },
   "suggest": {
     "mongodb/mongodb": "Required only if MONGO_URI is set in .env for caching",
