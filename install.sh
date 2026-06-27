@@ -165,7 +165,10 @@ if command -v ffmpeg >/dev/null 2>&1; then
 else
   warn "ffmpeg not found — installing..."
   if command -v apt-get >/dev/null 2>&1; then
-    apt-get install -y -q ffmpeg
+    SUDO=""
+    [[ "$EUID" -ne 0 ]] && SUDO="sudo"
+    $SUDO apt-get update -q
+    $SUDO apt-get install -y -q ffmpeg
     info "ffmpeg installed"
   else
     warn "Could not auto-install ffmpeg. Install manually:"
@@ -196,7 +199,10 @@ section "Clang"
 if ! command -v clang >/dev/null 2>&1; then
   warn "Clang not found — installing..."
   if command -v apt-get >/dev/null 2>&1; then
-    apt-get install -y -q clang libclang-dev
+    SUDO=""
+    [[ "$EUID" -ne 0 ]] && SUDO="sudo"
+    $SUDO apt-get update -q
+    $SUDO apt-get install -y -q clang libclang-dev
   else
     die "Please install clang manually: sudo apt install clang libclang-dev"
   fi
