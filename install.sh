@@ -194,20 +194,26 @@ fi
 [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
 command -v cargo >/dev/null 2>&1 || die "cargo not found after Rust install. Run: source \$HOME/.cargo/env"
 
-# ── 8. Clang (required by ext-php-rs) ────────────────────────────────────────
+# ── 8. Clang & native build deps (required by ext-php-rs / openssl-sys) ──────
 section "Clang"
-if ! command -v clang >/dev/null 2>&1; then
-  warn "Clang not found — installing..."
+MISSING_NATIVE_PKGS=()
+command -v clang >/dev/null 2>&1 || MISSING_NATIVE_PKGS+=(clang libclang-dev)
+command -v pkg-config >/dev/null 2>&1 || MISSING_NATIVE_PKGS+=(pkg-config)
+dpkg -s libssl-dev >/dev/null 2>&1 || MISSING_NATIVE_PKGS+=(libssl-dev)
+
+if [[ ${#MISSING_NATIVE_PKGS[@]} -gt 0 ]]; then
+  warn "Missing native build deps (${MISSING_NATIVE_PKGS[*]}) — installing..."
   if command -v apt-get >/dev/null 2>&1; then
     SUDO=""
     [[ "$EUID" -ne 0 ]] && SUDO="sudo"
     $SUDO apt-get update -q
-    $SUDO apt-get install -y -q clang libclang-dev
+    $SUDO apt-get install -y -q "${MISSING_NATIVE_PKGS[@]}"
   else
-    die "Please install clang manually: sudo apt install clang libclang-dev"
+    die "Please install manually: sudo apt install ${MISSING_NATIVE_PKGS[*]}"
   fi
 fi
 info "$(clang --version | head -1)"
+info "$(pkg-config --version | sed 's/^/pkg-config /')"
 
 # ── 9. phptgcalls ─────────────────────────────────────────────────────────────
 section "phptgcalls"
