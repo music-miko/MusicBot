@@ -58,6 +58,11 @@ define('DOWNLOAD_DIR',  ROOT_DIR . '/downloads');
 define('COOKIES_DIR',   ROOT_DIR . '/cookies');
 define('LOGS_DIR',      ROOT_DIR . '/logs');
 
+// ─── /start UI (mirrors tosu4's config.SUPPORT_CHAT / SUPPORT_CHANNEL / START_IMG_URL)
+define('SUPPORT_CHAT',    env('SUPPORT_CHAT',    'https://t.me/'));
+define('SUPPORT_CHANNEL', env('SUPPORT_CHANNEL', 'https://t.me/'));
+define('START_IMG_URL',   env('START_IMG_URL',   'https://telegra.ph/file/4495caf18f1d9d4f5e1f5.jpg'));
+
 // ─── phptgcalls / LiveProto paths ────────────────────────────────────────────
 // https://github.com/TakNone/phptgcalls  &  https://github.com/TakNone/LiveProto
 define('PHPTGCALLS_BIN', env('PHPTGCALLS_BIN', ROOT_DIR . '/bin/phptgcalls'));

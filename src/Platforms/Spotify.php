@@ -4,14 +4,18 @@
  *
  * Spotify platform handler for TeleMusic Bot v1.0.0
  *
- * Three-tier resolution (mirrors tosu4/AnonXMusic/platforms/Spotify.py):
+ * Three-tier resolution (mirrors tosu4/AnonXMusic/platforms/Spotify.py
+ * and TgMusicBot's spotify_dl.go):
  *
  *   Tier 1 — API-2 (onegrab.fun / API_URL2 + API_KEY2)
- *     GET /api/get_url?url=<spotify_url>&api_key=<key>
- *     → returns { url, key, iv, title, artist, duration, thumbnail }
- *     → download encrypted OGG from CDN URL
- *     → AES-128-CTR decrypt with key+iv
- *     → save as .ogg
+ *     GET /api/track?url=<spotify_url>   (header: X-API-Key)
+ *     → { id, url, cdnurl, key, platform }
+ *     → download encrypted OGG from cdnurl
+ *     → AES-128-CTR decrypt using the FIXED IV "72e067fbddcbcf77ebe8bc643f630d93"
+ *       (Spotify always uses this exact IV — it is never returned by the API,
+ *       only the per-track key is)
+ *     → patch OGG/Vorbis header bytes Spotify deliberately scrambles
+ *     → re-mux with ffmpeg to produce a clean, seekable .ogg
  *
  *   Tier 2 — Spotify Web API (client credentials)
  *     GET https://accounts.spotify.com/api/token (client_credentials)
@@ -22,7 +26,7 @@
  *     Derives search query from Spotify URL slug, hands off to YouTube.
  *
  * For playlists/albums: returns array of track metadata.
- * stream.php resolves each via YouTube search if no direct CDN URL.
+ * PlatformResolver resolves each via YouTube search if no direct CDN file.
  */
 
 declare(strict_types=1);
@@ -121,35 +125,43 @@ class Spotify
 
     private function api2GetTrack(string $url): ?array
     {
-        $endpoint = rtrim(API_URL2, '/') . '/api/get_url';
+        $endpoint = rtrim(API_URL2, '/') . '/api/track';
         try {
             $res  = $this->http->get($endpoint, [
-                'query'   => ['url' => $url, 'api_key' => API_KEY2],
+                'query'   => ['url' => $url],
+                'headers' => ['X-API-Key' => API_KEY2, 'Accept' => 'application/json'],
                 'timeout' => 20,
             ]);
             $data = json_decode((string) $res->getBody(), true);
 
-            if (!isset($data['url'])) {
-                $this->log->debug("[Spotify][API-2] No URL in response");
+            $cdnUrl = $data['cdnurl'] ?? $data['cdn_url'] ?? $data['url'] ?? null;
+            if (!$cdnUrl) {
+                $this->log->debug("[Spotify][API-2] No cdnurl in /api/track response");
                 return null;
             }
 
-            $cdnUrl    = $data['url'];
-            $aesKey    = $data['key']       ?? null;
-            $aesIv     = $data['iv']        ?? null;
-            $trackId   = $this->extractId($url);
-            $outPath   = DOWNLOAD_DIR . '/' . ($trackId ?: md5($url)) . '.ogg';
+            $aesKey  = $data['key'] ?? null;
+            $trackId = $data['id'] ?? $this->extractId($url) ?: md5($url);
+            $outPath = DOWNLOAD_DIR . '/' . $trackId . '.ogg';
 
-            $filePath = $this->downloadAndDecrypt($cdnUrl, $aesKey, $aesIv, $outPath);
+            $filePath = $this->downloadAndDecrypt($cdnUrl, $aesKey, $outPath, $trackId);
+            if (!$filePath) {
+                return null;
+            }
 
-            $dur = (int) ($data['duration'] ?? 0);
+            // /api/track only returns the CDN/key info, not display metadata
+            // (title, duration, thumbnail). Fetch that separately via /api/get_url,
+            // same split TgMusicBot uses (GetInfo for metadata, GetTrack for CDN).
+            $meta = $this->api2GetUrlMeta($url) ?? [];
+
+            $dur = (int) ($meta['duration'] ?? 0);
             return [
-                'title'        => $data['title']     ?? 'Unknown',
-                'artist'       => $data['artist']    ?? '',
+                'title'        => $meta['title']     ?? 'Unknown',
+                'artist'       => $meta['artist']    ?? '',
                 'duration_min' => $this->secondsToMin($dur),
                 'duration_sec' => $dur,
-                'thumb'        => $data['thumbnail'] ?? '',
-                'vidid'        => $trackId ?? '',
+                'thumb'        => $meta['thumbnail'] ?? '',
+                'vidid'        => $trackId,
                 'link'         => $url,
                 'file'         => $filePath,
                 'yt_query'     => null,
@@ -162,16 +174,48 @@ class Spotify
         }
     }
 
-    private function api2GetPlaylist(string $url): array
+    /**
+     * Fetch display metadata (title/artist/duration/thumbnail) for a single
+     * Spotify track via /api/get_url, which returns the full PlatformTracks/
+     * MusicTrack shape (unlike /api/track, which only carries CDN info).
+     */
+    private function api2GetUrlMeta(string $url): ?array
     {
-        $endpoint = rtrim(API_URL2, '/') . '/api/get_playlist';
+        $endpoint = rtrim(API_URL2, '/') . '/api/get_url';
         try {
             $res  = $this->http->get($endpoint, [
-                'query'   => ['url' => $url, 'api_key' => API_KEY2],
+                'query'   => ['url' => $url],
+                'headers' => ['X-API-Key' => API_KEY2, 'Accept' => 'application/json'],
+                'timeout' => 15,
+            ]);
+            $data    = json_decode((string) $res->getBody(), true);
+            $results = $data['results'] ?? [];
+            if (empty($results)) return null;
+
+            $t = $results[0];
+            return [
+                'title'     => $t['title'] ?? $t['name'] ?? null,
+                'artist'    => $t['artist'] ?? '',
+                'duration'  => $t['duration'] ?? 0,
+                'thumbnail' => $t['thumbnail'] ?? '',
+            ];
+        } catch (GuzzleException $e) {
+            $this->log->debug("[Spotify][API-2] get_url meta error: " . $e->getMessage());
+            return null;
+        }
+    }
+
+    private function api2GetPlaylist(string $url): array
+    {
+        $endpoint = rtrim(API_URL2, '/') . '/api/get_url';
+        try {
+            $res  = $this->http->get($endpoint, [
+                'query'   => ['url' => $url],
+                'headers' => ['X-API-Key' => API_KEY2, 'Accept' => 'application/json'],
                 'timeout' => 30,
             ]);
-            $data = json_decode((string) $res->getBody(), true);
-            $tracks = $data['tracks'] ?? [];
+            $data   = json_decode((string) $res->getBody(), true);
+            $tracks = $data['results'] ?? $data['tracks'] ?? [];
             if (empty($tracks)) return [];
 
             $result = [];
@@ -180,7 +224,7 @@ class Spotify
                 $t   = $tracks[$i];
                 $dur = (int) ($t['duration'] ?? 0);
                 $result[] = [
-                    'title'        => $t['title']     ?? 'Unknown',
+                    'title'        => $t['title']     ?? $t['name'] ?? 'Unknown',
                     'artist'       => $t['artist']    ?? '',
                     'duration_min' => $this->secondsToMin($dur),
                     'duration_sec' => $dur,
@@ -203,70 +247,114 @@ class Spotify
     // ── AES-128-CTR decryption (mirrors spotify_dl.go / Spotify.py) ──────────
 
     /**
-     * Download from CDN and decrypt with AES-128-CTR if key+iv provided.
-     * Returns local file path or null.
+     * Spotify's CDN audio is always encrypted with this exact IV — it is
+     * never returned by any API-2 implementation, only the per-track key is.
+     * (See tosu4/AnonXMusic/platforms/Api.py:_decrypt_spotify and
+     *  TgMusicBot/src/core/dl/spotify_dl.go:decryptAudioFile.)
      */
-    private function downloadAndDecrypt(string $url, ?string $hexKey, ?string $hexIv, string $outPath): ?string
-    {
-        // Download to temp file first
-        $tmpPath = $outPath . '.enc';
-        $downloaded = false;
+    private const SPOTIFY_FIXED_IV_HEX = '72e067fbddcbcf77ebe8bc643f630d93';
 
-        for ($attempt = 1; $attempt <= self::CDN_RETRIES; $attempt++) {
-            try {
-                $this->http->get($url, [
-                    'timeout' => self::DOWNLOAD_TIMEOUT,
-                    'sink'    => $tmpPath,
-                ]);
-                if (file_exists($tmpPath) && filesize($tmpPath) > 0) {
-                    $downloaded = true;
-                    break;
+    /**
+     * OGG/Vorbis header byte patches Spotify deliberately scrambles in its
+     * encrypted stream. Re-applying these fixed bytes after decryption is
+     * required before the file is playable / seekable.
+     * (Mirrors rebuildOGG() in spotify_dl.go and _rebuild_ogg() in Api.py.)
+     *
+     * @var array<int, string> offset => raw bytes to write
+     */
+    private const OGG_HEADER_PATCHES = [
+        0  => "OggS",
+        6  => "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+        26 => "\x01\x1E\x01vorbis",
+        39 => "\x02",
+        40 => "\x44\xAC\x00\x00",
+        48 => "\x00\xE2\x04\x00",
+        56 => "\xB8\x01",
+        58 => "OggS",
+        62 => "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+    ];
+
+    /**
+     * Download from CDN, AES-128-CTR decrypt (fixed IV), patch OGG headers,
+     * then re-mux with ffmpeg into a clean playable .ogg.
+     *
+     * Returns local file path or null on failure.
+     */
+    private function downloadAndDecrypt(string $url, ?string $hexKey, string $outPath, string $trackId): ?string
+    {
+        if (file_exists($outPath) && filesize($outPath) > 0) {
+            $this->log->info("[Spotify] Cache hit: $outPath");
+            return $outPath;
+        }
+
+        $encPath = DOWNLOAD_DIR . "/{$trackId}.encrypted";
+        $decPath = DOWNLOAD_DIR . "/{$trackId}_decrypted.ogg";
+
+        try {
+            // Download encrypted file
+            $downloaded = false;
+            for ($attempt = 1; $attempt <= self::CDN_RETRIES; $attempt++) {
+                try {
+                    $this->http->get($url, ['timeout' => self::DOWNLOAD_TIMEOUT, 'sink' => $encPath]);
+                    if (file_exists($encPath) && filesize($encPath) > 0) {
+                        $downloaded = true;
+                        break;
+                    }
+                } catch (GuzzleException $e) {
+                    $this->log->error("[Spotify][CDN] Attempt $attempt: " . $e->getMessage());
+                    if (file_exists($encPath)) unlink($encPath);
+                    sleep(self::CDN_RETRY_DELAY);
                 }
-            } catch (GuzzleException $e) {
-                $this->log->error("[Spotify][CDN] Attempt $attempt: " . $e->getMessage());
-                if (file_exists($tmpPath)) unlink($tmpPath);
-                sleep(self::CDN_RETRY_DELAY);
+            }
+            if (!$downloaded) {
+                $this->log->error("[Spotify][CDN] Download failed after retries: $url");
+                return null;
+            }
+
+            // No key → already-plaintext OGG, just needs the ffmpeg re-mux pass.
+            if (!$hexKey) {
+                return $this->fixOgg($encPath, $outPath) ? $outPath : null;
+            }
+
+            // AES-128-CTR decrypt with the fixed IV.
+            if (!$this->aesCtrDecrypt($encPath, $hexKey, $decPath)) {
+                return null;
+            }
+
+            // Patch OGG/Vorbis header bytes Spotify scrambles.
+            $this->rebuildOggHeaders($decPath);
+
+            // Re-mux with ffmpeg to produce the final clean, seekable .ogg.
+            if ($this->fixOgg($decPath, $outPath)) {
+                $this->log->info("[Spotify] Decrypted + remuxed: $outPath");
+                return $outPath;
+            }
+
+            // ffmpeg failed — fall back to the header-patched file as-is.
+            if (file_exists($decPath) && filesize($decPath) > 0) {
+                rename($decPath, $outPath);
+                $this->log->warning("[Spotify] ffmpeg remux failed, used patched OGG directly: $outPath");
+                return $outPath;
+            }
+            return null;
+
+        } finally {
+            foreach ([$encPath, $decPath] as $p) {
+                if (file_exists($p)) @unlink($p);
             }
         }
-
-        if (!$downloaded) {
-            $this->log->error("[Spotify][CDN] Download failed after retries: $url");
-            return null;
-        }
-
-        // No key = already plaintext OGG
-        if (!$hexKey || !$hexIv) {
-            rename($tmpPath, $outPath);
-            return $outPath;
-        }
-
-        // AES-128-CTR decrypt
-        $decrypted = $this->aesCtrDecrypt($tmpPath, $hexKey, $hexIv, $outPath);
-        @unlink($tmpPath);
-
-        if ($decrypted) {
-            $this->log->info("[Spotify] Decrypted: $outPath");
-            return $outPath;
-        }
-        return null;
     }
 
     /**
-     * AES-128-CTR decrypt.
-     *
-     * Spotify uses AES-128-CTR with:
-     *   key = 16-byte key (hex-encoded in API response)
-     *   iv  = 16-byte nonce/counter (hex-encoded)
-     *
-     * PHP's openssl_decrypt with 'aes-128-ctr' handles this directly.
+     * AES-128-CTR decrypt using Spotify's fixed IV.
      */
-    private function aesCtrDecrypt(string $inPath, string $hexKey, string $hexIv, string $outPath): bool
+    private function aesCtrDecrypt(string $inPath, string $hexKey, string $outPath): bool
     {
         $key = hex2bin($hexKey);
-        $iv  = hex2bin($hexIv);
+        $iv  = hex2bin(self::SPOTIFY_FIXED_IV_HEX);
 
-        if (strlen($key) !== 16 || strlen($iv) !== 16) {
-            $this->log->error("[Spotify][AES] Invalid key/iv lengths");
+        if ($key === false || strlen($key) !== 16) {
+            $this->log->error("[Spotify][AES] Invalid key length");
             return false;
         }
 
@@ -276,7 +364,6 @@ class Spotify
             return false;
         }
 
-        // openssl_decrypt expects non-raw ciphertext with OPENSSL_RAW_DATA flag
         $plaintext = openssl_decrypt(
             $ciphertext,
             'aes-128-ctr',
@@ -291,6 +378,45 @@ class Spotify
         }
 
         return file_put_contents($outPath, $plaintext) !== false;
+    }
+
+    /**
+     * Patch fixed OGG/Vorbis header bytes in-place at the file offsets
+     * Spotify's encryption scrambles. Mirrors rebuildOGG()/_rebuild_ogg().
+     */
+    private function rebuildOggHeaders(string $path): bool
+    {
+        $fp = fopen($path, 'r+b');
+        if (!$fp) {
+            $this->log->error("[Spotify][OGG] Cannot open for header patch: $path");
+            return false;
+        }
+        foreach (self::OGG_HEADER_PATCHES as $offset => $bytes) {
+            fseek($fp, $offset);
+            fwrite($fp, $bytes);
+        }
+        fclose($fp);
+        return true;
+    }
+
+    /**
+     * Re-mux with ffmpeg (stream copy, no re-encode) to produce a clean,
+     * properly-indexed .ogg file. Mirrors fixOGG()/_fix_ogg_ffmpeg().
+     */
+    private function fixOgg(string $inPath, string $outPath): bool
+    {
+        $cmd = sprintf(
+            'ffmpeg -y -i %s -c copy %s 2>&1',
+            escapeshellarg($inPath),
+            escapeshellarg($outPath)
+        );
+        exec($cmd, $output, $code);
+
+        if ($code !== 0 || !file_exists($outPath) || filesize($outPath) === 0) {
+            $this->log->warning("[Spotify][ffmpeg] remux failed (code $code): " . implode("\n", array_slice($output, -5)));
+            return false;
+        }
+        return true;
     }
 
     // ── Tier 2: Spotify Web API ───────────────────────────────────────────────

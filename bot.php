@@ -18,6 +18,7 @@ declare(strict_types=1);
 
 define('ROOT_DIR', __DIR__);
 define('VERSION', '1.0.0');
+define('BOOT_TIME', time());
 
 require_once ROOT_DIR . '/vendor/autoload.php';
 require_once ROOT_DIR . '/config/config.php';

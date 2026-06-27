@@ -19,6 +19,8 @@ class TelegramApi
     private Client $http;
     private Logger $log;
 
+    private static ?array $botInfo = null;
+
     private function __construct()
     {
         $this->http = new Client([
@@ -94,6 +96,36 @@ class TelegramApi
         ]);
     }
 
+    // ── Bot identity ─────────────────────────────────────────────────────────
+
+    /**
+     * Fetch and cache this bot's own identity (id, username, first_name).
+     * Call once at startup; safe to call repeatedly (cached after first success).
+     */
+    public function fetchBotInfo(): ?array
+    {
+        if (self::$botInfo !== null) {
+            return self::$botInfo;
+        }
+        $me = $this->call('getMe');
+        if ($me) {
+            self::$botInfo = $me;
+        }
+        return self::$botInfo;
+    }
+
+    public static function botUsername(): string
+    {
+        return self::$botInfo['username'] ?? '';
+    }
+
+    public static function botMention(): string
+    {
+        $name = self::$botInfo['first_name'] ?? 'Bot';
+        $username = self::$botInfo['username'] ?? null;
+        return $username ? "@$username" : $name;
+    }
+
     // ── Raw API call ─────────────────────────────────────────────────────────
 
     public function call(string $method, array $params = []): ?array
@@ -144,5 +176,65 @@ class TelegramApi
             ['text' => '⏭ Skip',  'callback_data' => "skip_{$chatId}"],
             ['text' => '⏹ Stop',  'callback_data' => "stop_{$chatId}"],
         ]]);
+    }
+
+    // ── /start panels (mirrors tosu4's AnonXMusic/utils/inline/start.py) ──────
+
+    /** Shown for /start in a group chat. */
+    public static function startGroupPanel(): array
+    {
+        $username = self::botUsername();
+        return self::inlineKeyboard([[
+            ['text' => '➕ Add Me', 'url' => "https://t.me/{$username}?startgroup=true"],
+            ['text' => '🆘 Support', 'url' => SUPPORT_CHAT],
+        ]]);
+    }
+
+    /** Shown for /start in a private chat. */
+    public static function privatePanel(): array
+    {
+        $username = self::botUsername();
+        return self::inlineKeyboard([
+            [['text' => '➕ Add to Group', 'url' => "https://t.me/{$username}?startgroup=true"]],
+            [['text' => '📜 Help & Commands', 'callback_data' => 'help_back_helper']],
+            [
+                ['text' => '🆘 Support Chat', 'url' => SUPPORT_CHAT],
+                ['text' => '📢 Updates', 'url' => SUPPORT_CHANNEL],
+            ],
+            [['text' => '🅰️ Setup Guide', 'callback_data' => 'setup_guide_helper']],
+        ]);
+    }
+
+    /** Shown when the bot is added to a group. */
+    public static function welcomePanel(): array
+    {
+        return self::inlineKeyboard([[
+            ['text' => '🅰️ Setup Guide', 'callback_data' => 'setup_guide_helper'],
+        ]]);
+    }
+
+    /** Back/Close row shown on the setup-guide screen. */
+    public static function guideBackMarkup(): array
+    {
+        return self::inlineKeyboard([[
+            ['text' => '◀️ Back', 'callback_data' => 'start_back_helper'],
+            ['text' => '✖️ Close', 'callback_data' => 'close'],
+        ]]);
+    }
+
+    /** Help panel — category overview with a Back button to /start. */
+    public static function helpPanel(): array
+    {
+        return self::inlineKeyboard([
+            [
+                ['text' => '▶️ Playback', 'callback_data' => 'help_playback'],
+                ['text' => '⏯ Controls', 'callback_data' => 'help_controls'],
+            ],
+            [
+                ['text' => '📋 Queue', 'callback_data' => 'help_queue'],
+                ['text' => '⚙️ Settings', 'callback_data' => 'help_settings'],
+            ],
+            [['text' => '◀️ Back', 'callback_data' => 'start_back_helper']],
+        ]);
     }
 }

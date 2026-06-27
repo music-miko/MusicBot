@@ -37,6 +37,7 @@ class Bot
     public function run(): void
     {
         $this->log->info("Bot polling started");
+        TelegramApi::getInstance()->fetchBotInfo();
         $this->setupCommands();
 
         while (true) {
@@ -87,6 +88,7 @@ class Bot
             $this->http->post('setMyCommands', [
                 'json' => [
                     'commands' => [
+                        ['command' => 'start',   'description' => 'Start the bot / show welcome panel'],
                         ['command' => 'play',    'description' => 'Play a song (YouTube/Spotify URL or search)'],
                         ['command' => 'vplay',   'description' => 'Play a video in video chat'],
                         ['command' => 'pause',   'description' => 'Pause current track'],
