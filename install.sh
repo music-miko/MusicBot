@@ -85,12 +85,12 @@ for candidate in /usr/local/bin/composer /usr/local/bin/composer2 /usr/bin/compo
   if command -v "$candidate" >/dev/null 2>&1; then
     _ver=$("$candidate" --version --no-interaction 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1 || true)
     _major=${_ver%%.*}
+    _minor=$(echo "$_ver" | cut -d. -f2)
     if [[ -n "$_major" ]] && [[ "$_major" -ge 2 ]]; then
-      # Check plugin-api version >= 2.5
-      _plugin_ver=$("$candidate" --version --no-interaction 2>/dev/null | grep -oP 'Plugin API \K[\d.]+' || echo "0")
-      _plugin_major=${_plugin_ver%%.*}
-      _plugin_minor=$(echo "$_plugin_ver" | cut -d. -f2)
-      if [[ "$_plugin_major" -gt 2 ]] || { [[ "$_plugin_major" -eq 2 ]] && [[ "$_plugin_minor" -ge 5 ]]; }; then
+      # Composer >= 2.5 always ships Plugin API >= 2.5, so the Composer
+      # version itself is sufficient. Some builds don't print a "Plugin API"
+      # line in plain `--version` output, so we no longer depend on parsing it.
+      if [[ "$_major" -gt 2 ]] || { [[ "$_major" -eq 2 ]] && [[ "$_minor" -ge 5 ]]; }; then
         COMPOSER="$candidate"
         break
       fi
