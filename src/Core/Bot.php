@@ -39,6 +39,7 @@ class Bot
         $this->log->info("Bot polling started");
         TelegramApi::getInstance()->fetchBotInfo();
         $this->setupCommands();
+        $this->discardBacklog();
 
         while (true) {
             try {
@@ -54,6 +55,44 @@ class Bot
                 $this->log->error("Polling loop error: " . $e->getMessage());
                 sleep(1);
             }
+        }
+    }
+
+    /**
+     * Skip any updates (commands, callbacks, etc.) that piled up on
+     * Telegram's side while the bot was offline. Without this, a restart
+     * causes every queued /play, /skip, button tap, etc. from the downtime
+     * to fire all at once.
+     *
+     * Mechanism: requesting offset=-1 returns only the single most recent
+     * pending update (if any), without consuming it. We read its update_id
+     * and ack everything up to and including it via a zero-timeout call —
+     * this discards the backlog without processing any of it.
+     */
+    private function discardBacklog(): void
+    {
+        try {
+            $res  = $this->http->get('getUpdates', [
+                'query' => ['offset' => -1, 'timeout' => 0, 'limit' => 1],
+            ]);
+            $data    = json_decode((string) $res->getBody(), true);
+            $pending = $data['result'] ?? [];
+
+            if (empty($pending)) {
+                return; // nothing queued
+            }
+
+            $latestId    = $pending[0]['update_id'];
+            $this->offset = $latestId + 1;
+
+            // Ack the offset so Telegram drops everything up to $latestId.
+            $this->http->get('getUpdates', [
+                'query' => ['offset' => $this->offset, 'timeout' => 0, 'limit' => 1],
+            ]);
+
+            $this->log->info("Discarded backlogged updates up to update_id=$latestId");
+        } catch (\Throwable $e) {
+            $this->log->warning("discardBacklog failed (continuing anyway): " . $e->getMessage());
         }
     }
 
